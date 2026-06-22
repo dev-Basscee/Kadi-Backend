@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kadi-backend
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      - db
+    networks:
+      - kadi-network
+
+  # A local PostgreSQL instance for development if you don't want to use Supabase cloud immediately
+  db:
+    image: postgres:15-alpine
+    container_name: kadi-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: kadi_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Optionally, mount the schema to auto-initialize the database
+      - ./supabase/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    networks:
+      - kadi-network
+
+  # Redis for Semantic Caching and Rate Limiting
+  redis:
+    image: redis:7-alpine
+    container_name: kadi-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    networks:
+      - kadi-network
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  kadi-network:
+    driver: bridge

@@ -28,3 +28,4 @@
 # OS files
 .DS_Store
 Thumbs.db
+push_files.ps1

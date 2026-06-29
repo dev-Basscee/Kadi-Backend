@@ -36,6 +36,9 @@ type Fixture struct {
 	H2HAwayWins     int       `json:"h2h_away_wins"`
 	H2HDraws        int       `json:"h2h_draws"`
 	IsPremium       bool      `json:"is_premium"`
+	TxlineSignature *string   `json:"txline_signature"`
+	MerkleRoot      *string   `json:"merkle_root"`
+	ProofReceipt    []byte    `json:"proof_receipt"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
@@ -62,7 +65,7 @@ func (s *FixtureStore) ListByDate(ctx context.Context, date time.Time) ([]Fixtur
 			COALESCE(probability_home,0), COALESCE(probability_draw,0), COALESCE(probability_away,0),
 			COALESCE(home_form,'{}'), COALESCE(away_form,'{}'),
 			h2h_home_wins, h2h_away_wins, h2h_draws,
-			is_premium, updated_at
+			is_premium, txline_signature, merkle_root, proof_receipt, updated_at
 		FROM fixtures
 		WHERE match_date::date = $1::date
 		ORDER BY match_date ASC`,
@@ -89,7 +92,7 @@ func (s *FixtureStore) ListLive(ctx context.Context) ([]Fixture, error) {
 			COALESCE(probability_home,0), COALESCE(probability_draw,0), COALESCE(probability_away,0),
 			COALESCE(home_form,'{}'), COALESCE(away_form,'{}'),
 			h2h_home_wins, h2h_away_wins, h2h_draws,
-			is_premium, updated_at
+			is_premium, txline_signature, merkle_root, proof_receipt, updated_at
 		FROM fixtures
 		WHERE status = 'live'
 		ORDER BY match_date ASC`,
@@ -115,7 +118,7 @@ func (s *FixtureStore) GetByID(ctx context.Context, id string) (*Fixture, error)
 			COALESCE(probability_home,0), COALESCE(probability_draw,0), COALESCE(probability_away,0),
 			COALESCE(home_form,'{}'), COALESCE(away_form,'{}'),
 			h2h_home_wins, h2h_away_wins, h2h_draws,
-			is_premium, updated_at
+			is_premium, txline_signature, merkle_root, proof_receipt, updated_at
 		FROM fixtures WHERE id = $1`, id)
 
 	var f Fixture
@@ -139,10 +142,11 @@ func (s *FixtureStore) UpsertFixture(ctx context.Context, f *Fixture) error {
 			probability_home, probability_draw, probability_away,
 			home_form, away_form,
 			h2h_home_wins, h2h_away_wins, h2h_draws,
-			is_premium
+			is_premium, txline_signature, merkle_root, proof_receipt
 		) VALUES (
 			$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-			$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
+			$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,
+			$25,$26,$27
 		)
 		ON CONFLICT (api_id) DO UPDATE SET
 			status          = EXCLUDED.status,
@@ -152,6 +156,9 @@ func (s *FixtureStore) UpsertFixture(ctx context.Context, f *Fixture) error {
 			odds_home       = EXCLUDED.odds_home,
 			odds_draw       = EXCLUDED.odds_draw,
 			odds_away       = EXCLUDED.odds_away,
+			txline_signature= EXCLUDED.txline_signature,
+			merkle_root     = EXCLUDED.merkle_root,
+			proof_receipt   = EXCLUDED.proof_receipt,
 			updated_at      = NOW()`,
 		f.ApiID, f.Sport, f.HomeTeamName, f.AwayTeamName,
 		f.HomeTeamLogo, f.AwayTeamLogo,
@@ -162,6 +169,7 @@ func (s *FixtureStore) UpsertFixture(ctx context.Context, f *Fixture) error {
 		f.HomeForm, f.AwayForm,
 		f.H2HHomeWins, f.H2HAwayWins, f.H2HDraws,
 		f.IsPremium,
+		f.TxlineSignature, f.MerkleRoot, f.ProofReceipt,
 	)
 	return err
 }
@@ -173,6 +181,18 @@ func (s *FixtureStore) UpdateLiveScore(ctx context.Context, apiID, status string
 		SET status = $2, home_score = $3, away_score = $4, minute = $5, updated_at = NOW()
 		WHERE api_id = $1`,
 		apiID, status, homeScore, awayScore, minute,
+	)
+	return err
+}
+
+// UpdateLiveScoreWithTxLine atomically updates score, match status, and TxLine proofs for a live fixture.
+func (s *FixtureStore) UpdateLiveScoreWithTxLine(ctx context.Context, apiID, status string, homeScore, awayScore, minute int, sig, merkle string, proof []byte) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE fixtures
+		SET status = $2, home_score = $3, away_score = $4, minute = $5,
+		    txline_signature = $6, merkle_root = $7, proof_receipt = $8, updated_at = NOW()
+		WHERE api_id = $1`,
+		apiID, status, homeScore, awayScore, minute, sig, merkle, proof,
 	)
 	return err
 }
@@ -194,7 +214,7 @@ func scanFixture(row scannable, f *Fixture) error {
 		&f.ProbabilityHome, &f.ProbabilityDraw, &f.ProbabilityAway,
 		&f.HomeForm, &f.AwayForm,
 		&f.H2HHomeWins, &f.H2HAwayWins, &f.H2HDraws,
-		&f.IsPremium, &f.UpdatedAt,
+		&f.IsPremium, &f.TxlineSignature, &f.MerkleRoot, &f.ProofReceipt, &f.UpdatedAt,
 	)
 }
 

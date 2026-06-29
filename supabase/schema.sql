@@ -66,6 +66,9 @@ CREATE TABLE IF NOT EXISTS fixtures (
     h2h_away_wins       INT DEFAULT 0,
     h2h_draws           INT DEFAULT 0,
     is_premium          BOOLEAN DEFAULT FALSE,
+    txline_signature    TEXT,
+    merkle_root         TEXT,
+    proof_receipt       JSONB,
     ingested_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );

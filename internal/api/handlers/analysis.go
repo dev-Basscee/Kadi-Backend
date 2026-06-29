@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,7 +11,6 @@ import (
 	"github.com/kadi/backend/internal/ai"
 	"github.com/kadi/backend/internal/db"
 	"github.com/kadi/backend/internal/db/queries"
-	"github.com/redis/go-redis/v9"
 )
 
 // AnalysisHandler powers the DeepDiveModal and AIAnalysisExplainer.
@@ -26,84 +26,98 @@ func NewAnalysisHandler(fixtures *queries.FixtureStore, gemini *ai.GeminiClient,
 }
 
 // DeepDive generates a full AI analysis for a specific match.
-// This is the most compute-intensive endpoint — it fetches context from the DB
-// and streams a structured response from Gemini.
-//
-// POST /api/v1/analysis/deep-dive
-// Body: { "match_id": "<uuid>" }
 func (h *AnalysisHandler) DeepDive(c *gin.Context) {
-	var req struct {
-		MatchID string `json:"match_id" binding:"required"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	req, err := h.parseDeepDiveReq(c)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 1. Fetch fixture context from database
 	fixture, err := h.fixtures.GetByID(c.Request.Context(), req.MatchID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "match not found"})
 		return
 	}
 
-	// 2. Check Redis Semantic Cache
+	// Skip cache if we are asking for real-time TxLINE analysis
+	if req.TxLineData == nil && h.serveCachedAnalysis(c, fixture) {
+		return
+	}
+
+	h.generateAndServeAnalysis(c, fixture, req.TxLineData)
+}
+
+type DeepDiveRequest struct {
+	MatchID    string                `json:"match_id" binding:"required"`
+	TxLineData *ai.TxLineDataPayload `json:"txline_data,omitempty"`
+}
+
+func (h *AnalysisHandler) parseDeepDiveReq(c *gin.Context) (*DeepDiveRequest, error) {
+	var req DeepDiveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		return nil, err
+	}
+	return &req, nil
+}
+
+func (h *AnalysisHandler) serveCachedAnalysis(c *gin.Context, fixture *queries.Fixture) bool {
 	ctx := c.Request.Context()
 	cacheKey := fmt.Sprintf("analysis:fixture:%s", fixture.ID)
 	cachedJSON, err := h.rdb.Client.Get(ctx, cacheKey).Result()
 	
-	if err == nil && cachedJSON != "" {
-		// Cache Hit
-		var cachedAnalysis ai.MatchAnalysis
-		if json.Unmarshal([]byte(cachedJSON), &cachedAnalysis) == nil {
-			c.JSON(http.StatusOK, gin.H{
-				"match_id": req.MatchID,
-				"fixture": gin.H{
-					"home": fixture.HomeTeamName,
-					"away": fixture.AwayTeamName,
-					"date": fixture.MatchDate,
-				},
-				"analysis": cachedAnalysis,
-				"cached":   true,
-			})
-			return
-		}
+	if err != nil || cachedJSON == "" {
+		return false
 	}
 
-	// 3. Determine Model Tier
-	isPremium := c.GetBool("isPremium") // We'll assume auth middleware sets this
+	var cachedAnalysis ai.MatchAnalysis
+	if json.Unmarshal([]byte(cachedJSON), &cachedAnalysis) == nil {
+		h.respondWithAnalysis(c, fixture, cachedAnalysis, true)
+		return true
+	}
+	return false
+}
+
+func (h *AnalysisHandler) generateAndServeAnalysis(c *gin.Context, fixture *queries.Fixture, txData *ai.TxLineDataPayload) {
+	ctx := c.Request.Context()
 	modelName := "gemini-1.5-flash"
-	if isPremium {
+	if c.GetBool("isPremium") {
 		modelName = "gemini-3.1-pro-preview"
 	}
 
-	// 4. Call Gemini for deep analysis (Cache Miss)
-	analysis, err := h.gemini.AnalyzeMatch(ctx, fixture, modelName)
+	analysis, err := h.gemini.AnalyzeMatch(ctx, fixture, txData, modelName)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "AI analysis failed: " + err.Error()})
 		return
 	}
 
-	// 5. Save to Redis Cache (12 hour TTL)
+	// Cache unless it's a real-time customized analysis
+	if txData == nil {
+		h.cacheAnalysis(ctx, fixture.ID, analysis)
+	}
+	h.respondWithAnalysis(c, fixture, analysis, false)
+}
+
+func (h *AnalysisHandler) cacheAnalysis(ctx context.Context, fixtureID string, analysis *ai.MatchAnalysis) {
+	cacheKey := fmt.Sprintf("analysis:fixture:%s", fixtureID)
 	if analysisBytes, err := json.Marshal(analysis); err == nil {
 		h.rdb.Client.Set(ctx, cacheKey, analysisBytes, 12*time.Hour)
 	}
+}
 
+func (h *AnalysisHandler) respondWithAnalysis(c *gin.Context, fixture *queries.Fixture, analysis interface{}, cached bool) {
 	c.JSON(http.StatusOK, gin.H{
-		"match_id": req.MatchID,
+		"match_id": fixture.ID,
 		"fixture": gin.H{
 			"home": fixture.HomeTeamName,
 			"away": fixture.AwayTeamName,
 			"date": fixture.MatchDate,
 		},
 		"analysis": analysis,
-		"cached":   false,
+		"cached":   cached,
 	})
 }
 
 // Explain returns a concise confidence explanation for why a prediction was made.
-//
-// GET /api/v1/analysis/explain/:match_id
 func (h *AnalysisHandler) Explain(c *gin.Context) {
 	matchID := c.Param("match_id")
 

@@ -13,21 +13,20 @@ type Config struct {
 	Port string
 
 	// Supabase / PostgreSQL
-	DatabaseURL   string // Full Supabase Connection Pooler URL (pgbouncer mode)
-	SupabaseJWTSecret string // Used by the auth middleware to verify tokens
-	RedisURL      string // Redis connection string
+	DatabaseURL            string // Full Supabase Connection Pooler URL (pgbouncer mode)
+	SupabaseJWTSecret      string // Used by the auth middleware to verify tokens
+	SupabaseURL            string // Supabase Project URL
+	SupabaseAnonKey        string // Supabase Anon Key for client connections
+	SupabaseServiceRoleKey string // Supabase Service Role Key (Secret)
+	RedisURL               string // Redis connection string
 
-	// Third-party sports data APIs
-	APIFootballKey string // api-football.com / Sportradar key
-	APIFootballURL string
+	// Third-party sports data APIs (TxLINE)
+	TxLineStreamURL string // The SSE endpoint URL
+	TxLineAPIKey    string // API Key for TxLINE
 
 	// Google Gemini
 	GeminiAPIKey string
 	GeminiModel  string // e.g. "gemini-1.5-flash"
-
-	// Workers
-	LiveTickerIntervalSec  int // default: 12
-	DailySyncIntervalHours int // default: 24
 
 	// Environment
 	Env string // "development" | "production"
@@ -36,21 +35,22 @@ type Config struct {
 // Load reads the .env file (if present) and populates a Config struct.
 // Values already set in the OS environment take precedence over .env.
 func Load() (*Config, error) {
-	// Best-effort: load .env — ignore error if file doesn't exist in prod
-	_ = godotenv.Load()
+	// Best-effort: load shared frontend .env.local, then local fallbacks
+	_ = godotenv.Load("../Kadi/.env.local", ".env.local", ".env")
 
 	cfg := &Config{
 		Port:                   getEnv("PORT", "8080"),
 		DatabaseURL:            mustEnv("DATABASE_URL"),
 		SupabaseJWTSecret:      mustEnv("SUPABASE_JWT_SECRET"),
+		SupabaseURL:            mustEnv("NEXT_PUBLIC_SUPABASE_URL"),
+		SupabaseAnonKey:        mustEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY"),
+		SupabaseServiceRoleKey: mustEnv("SUPABASE_SERVICE_ROLE_KEY"),
 		RedisURL:               getEnv("REDIS_URL", "redis://localhost:6379/0"),
-		APIFootballKey:         getEnv("API_FOOTBALL_KEY", ""),
-		APIFootballURL:         getEnv("API_FOOTBALL_URL", "https://v3.football.api-sports.io"),
-		GeminiAPIKey:           mustEnv("GEMINI_API_KEY"),
-		GeminiModel:            getEnv("GEMINI_MODEL", "gemini-1.5-flash"),
-		LiveTickerIntervalSec:  getEnvInt("LIVE_TICKER_INTERVAL_SEC", 12),
-		DailySyncIntervalHours: getEnvInt("DAILY_SYNC_INTERVAL_HOURS", 24),
-		Env:                    getEnv("ENV", "development"),
+		TxLineStreamURL:   mustEnv("TXLINE_STREAM_URL"),
+		TxLineAPIKey:      mustEnv("TXLINE_API_KEY"),
+		GeminiAPIKey:      mustEnv("GEMINI_API_KEY"),
+		GeminiModel:       getEnv("GEMINI_MODEL", "gemini-1.5-flash"),
+		Env:               getEnv("ENV", "development"),
 	}
 
 	return cfg, nil
@@ -76,17 +76,4 @@ func mustEnv(key string) string {
 		panic(fmt.Sprintf("required environment variable %q is not set", key))
 	}
 	return v
-}
-
-func getEnvInt(key string, fallback int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	var n int
-	_, err := fmt.Sscanf(v, "%d", &n)
-	if err != nil {
-		return fallback
-	}
-	return n
 }

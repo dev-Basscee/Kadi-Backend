@@ -2,12 +2,15 @@ package workers
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kadi/backend/internal/config"
@@ -15,16 +18,175 @@ import (
 	"github.com/kadi/backend/internal/db/queries"
 )
 
+// ─── TxLINE Auth ─────────────────────────────────────────────────────────────
+
+// txLineGuestAuthResponse is the response from POST /auth/guest/start.
+type txLineGuestAuthResponse struct {
+	Token string `json:"token"`
+}
+
+// fetchGuestJWT calls /auth/guest/start on the TxLINE base URL and returns
+// a short-lived session JWT. This must be sent as Authorization: Bearer <jwt>
+// alongside X-Api-Token: <long-lived-api-token> on every SSE request.
+func fetchGuestJWT(ctx context.Context, baseURL string) (string, error) {
+	authURL := strings.TrimRight(baseURL, "/scores/stream") + "/auth/guest/start"
+
+	// Derive the base URL properly: everything before /api/
+	// e.g. https://txline-dev.txodds.com/api/scores/stream -> https://txline-dev.txodds.com
+	if idx := strings.Index(baseURL, "/api/"); idx != -1 {
+		authURL = baseURL[:idx] + "/auth/guest/start"
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authURL, bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return "", fmt.Errorf("txline: build auth request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("txline: guest auth request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("txline: guest auth returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result txLineGuestAuthResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("txline: failed to decode guest auth response: %w", err)
+	}
+	if result.Token == "" {
+		return "", fmt.Errorf("txline: guest auth returned empty token")
+	}
+	return result.Token, nil
+}
+
+// ─── TxLINE Event types ───────────────────────────────────────────────────────
+
+// TxLineScore holds per-half and total score data for one participant.
+type TxLineScore struct {
+	H1    map[string]int `json:"H1"`
+	HT    map[string]int `json:"HT"`
+	H2    map[string]int `json:"H2"`
+	Total map[string]int `json:"Total"`
+}
+
+// TxLineClock holds the running clock state.
+type TxLineClock struct {
+	Running bool `json:"Running"`
+	Seconds int  `json:"Seconds"`
+}
+
+// TxLineEvent is the real SSE event shape returned by TxLINE (confirmed via
+// live test on 2026-06-29). Fields are a superset; unknown fields are ignored.
+type TxLineEvent struct {
+	FixtureID   int    `json:"FixtureId"`
+	GameState   string `json:"GameState"`
+	StartTime   int64  `json:"StartTime"`
+	SportID     int    `json:"SportId"`
+	CompetitionID int  `json:"CompetitionId"`
+	CountryID   int    `json:"CountryId"`
+	Action      string `json:"Action"` // "goal", "substitution", "standby", "possible", etc.
+	StatusID    int    `json:"StatusId"`
+	Confirmed   bool   `json:"Confirmed"`
+	Seq         int    `json:"Seq"`
+
+	Clock TxLineClock `json:"Clock"`
+
+	Score struct {
+		Participant1 TxLineScore `json:"Participant1"`
+		Participant2 TxLineScore `json:"Participant2"`
+	} `json:"Score"`
+
+	// Legacy / mapped fields (kept for DB compatibility)
+	MatchID         string          `json:"match_id"`
+	Status          string          `json:"status"`
+	HomeScore       int             `json:"home_score"`
+	AwayScore       int             `json:"away_score"`
+	Minute          int             `json:"minute"`
+	TxLineSignature string          `json:"txline_signature"`
+	MerkleRoot      string          `json:"merkle_root"`
+	ProofReceipt    json.RawMessage `json:"proof_receipt"`
+}
+
+// toMatchID derives a string match ID from the numeric FixtureId.
+func (e *TxLineEvent) toMatchID() string {
+	if e.MatchID != "" {
+		return e.MatchID
+	}
+	return fmt.Sprintf("%d", e.FixtureID)
+}
+
+// toHomeScore extracts the total home goals from Score, falling back to HomeScore.
+func (e *TxLineEvent) toHomeScore() int {
+	if goals, ok := e.Score.Participant1.Total["Goals"]; ok {
+		return goals
+	}
+	return e.HomeScore
+}
+
+// toAwayScore extracts the total away goals from Score, falling back to AwayScore.
+func (e *TxLineEvent) toAwayScore() int {
+	if goals, ok := e.Score.Participant2.Total["Goals"]; ok {
+		return goals
+	}
+	return e.AwayScore
+}
+
+// toMinute converts clock seconds to match minute.
+func (e *TxLineEvent) toMinute() int {
+	if e.Minute != 0 {
+		return e.Minute
+	}
+	return e.Clock.Seconds / 60
+}
+
+// toStatus maps TxLINE StatusId / GameState to the app's status strings.
+func (e *TxLineEvent) toStatus() string {
+	if e.Status != "" {
+		return e.Status
+	}
+	switch e.StatusID {
+	case 1:
+		return "scheduled"
+	case 2:
+		return "live"
+	case 3:
+		return "finished"
+	case 4:
+		return "live" // in-progress per confirmed test data
+	default:
+		if e.GameState != "" {
+			return e.GameState
+		}
+		return "unknown"
+	}
+}
+
+// ─── LiveTickerWorker ─────────────────────────────────────────────────────────
+
 // LiveTickerWorker connects to the TxLINE SSE stream
 // for live match updates (scores, minute, status changes).
 // When a match finishes, it triggers the bet settlement pipeline.
+//
+// Auth: TxLINE requires TWO credentials per request (confirmed from OpenAPI spec):
+//
+//	Authorization: Bearer <short-lived guest JWT>   — refreshed on each (re)connect
+//	X-Api-Token:   <long-lived API token>            — from TXLINE_API_KEY env var
 type LiveTickerWorker struct {
 	cfg      *config.Config
 	fixtures *queries.FixtureStore
 	bankroll *queries.BankrollStore
 	rdb      *db.RedisClient
 
-	// Track which fixture IDs were live on the last tick to detect transitions
+	// jwt is the cached guest JWT; refreshed on each (re)connect.
+	jwtMu sync.Mutex
+	jwt   string
+
+	// Track which fixture IDs were live on the last tick to detect transitions.
 	previouslyLive map[string]string // match_id -> previous status
 }
 
@@ -36,10 +198,10 @@ func NewLiveTickerWorker(
 	rdb *db.RedisClient,
 ) *LiveTickerWorker {
 	return &LiveTickerWorker{
-		cfg:      cfg,
-		fixtures: fixtures,
-		bankroll: bankroll,
-		rdb:      rdb,
+		cfg:            cfg,
+		fixtures:       fixtures,
+		bankroll:       bankroll,
+		rdb:            rdb,
 		previouslyLive: make(map[string]string),
 	}
 }
@@ -77,36 +239,29 @@ func (w *LiveTickerWorker) Run(ctx context.Context) {
 	}
 }
 
-type TxLineUpdate struct {
-	MatchID   string `json:"match_id"`
-	Status    string `json:"status"`
-	HomeScore int    `json:"home_score"`
-	AwayScore int    `json:"away_score"`
-	Minute    int    `json:"minute"`
-	Odds      struct {
-		Home float64 `json:"home"`
-		Draw float64 `json:"draw"`
-		Away float64 `json:"away"`
-	} `json:"odds"`
-	TxLineSignature string          `json:"txline_signature"`
-	MerkleRoot      string          `json:"merkle_root"`
-	ProofReceipt    json.RawMessage `json:"proof_receipt"`
-}
-
+// connectTxLineSSE fetches a fresh guest JWT, then opens the SSE stream with
+// both required headers and processes events until the connection drops.
 func (w *LiveTickerWorker) connectTxLineSSE(ctx context.Context) error {
-	url := w.cfg.TxLineStreamURL
+	// ── Step 1: fetch a fresh short-lived guest JWT ───────────────────────────
+	jwt, err := fetchGuestJWT(ctx, w.cfg.TxLineStreamURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch guest JWT: %w", err)
+	}
+	w.jwtMu.Lock()
+	w.jwt = jwt
+	w.jwtMu.Unlock()
+	log.Printf("[live-ticker] guest JWT acquired (%.20s...)", jwt)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// ── Step 2: open SSE stream with BOTH required headers ────────────────────
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, w.cfg.TxLineStreamURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	// Set the API Key
-	if w.cfg.TxLineAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+w.cfg.TxLineAPIKey)
-	}
+	req.Header.Set("Authorization", "Bearer "+jwt)         // short-lived session JWT
+	req.Header.Set("X-Api-Token", w.cfg.TxLineAPIKey)      // long-lived API token
 
-	client := &http.Client{Timeout: 0} // No timeout for SSE connection
+	client := &http.Client{Timeout: 0} // no timeout — SSE is long-lived
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("sse connection failed: %w", err)
@@ -114,45 +269,55 @@ func (w *LiveTickerWorker) connectTxLineSSE(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(body))
 	}
 
+	log.Println("[live-ticker] SSE stream connected — receiving events")
+
+	// ── Step 3: process incoming SSE events ───────────────────────────────────
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		
+
 		dataStr := strings.TrimPrefix(line, "data: ")
 		if dataStr == "" {
 			continue
 		}
 
-		var update TxLineUpdate
-		if err := json.Unmarshal([]byte(dataStr), &update); err != nil {
-			log.Printf("[live-ticker] failed to parse update: %v", err)
+		var event TxLineEvent
+		if err := json.Unmarshal([]byte(dataStr), &event); err != nil {
+			log.Printf("[live-ticker] failed to parse event: %v", err)
 			continue
 		}
+
+		matchID  := event.toMatchID()
+		status   := event.toStatus()
+		home     := event.toHomeScore()
+		away     := event.toAwayScore()
+		minute   := event.toMinute()
 
 		if err := w.fixtures.UpdateLiveScoreWithTxLine(
-			ctx, update.MatchID, update.Status, update.HomeScore, update.AwayScore, update.Minute,
-			update.TxLineSignature, update.MerkleRoot, update.ProofReceipt,
+			ctx, matchID, status, home, away, minute,
+			event.TxLineSignature, event.MerkleRoot, event.ProofReceipt,
 		); err != nil {
-			log.Printf("[live-ticker] ERROR updating %s: %v", update.MatchID, err)
+			log.Printf("[live-ticker] ERROR updating fixture %s: %v", matchID, err)
 			continue
 		}
 
-		// Broadcast to Redis Pub/Sub for frontend clients bypassing Supabase Realtime
+		// Broadcast raw event to Redis Pub/Sub for frontend clients
 		if err := w.rdb.Client.Publish(ctx, "txline:updates", dataStr).Err(); err != nil {
 			log.Printf("[live-ticker] ERROR publishing to Redis: %v", err)
 		}
 
-		w.previouslyLive[update.MatchID] = update.Status
+		w.previouslyLive[matchID] = status
 
-		if update.Status == "finished" {
-			log.Printf("[live-ticker] match FINISHED: %s — triggering settlement", update.MatchID)
-			go w.settleMatchBets(ctx, update.MatchID, update.HomeScore, update.AwayScore)
+		if status == "finished" {
+			log.Printf("[live-ticker] match FINISHED: %s — triggering settlement", matchID)
+			go w.settleMatchBets(ctx, matchID, home, away)
 		}
 	}
 
@@ -161,6 +326,8 @@ func (w *LiveTickerWorker) connectTxLineSSE(ctx context.Context) error {
 	}
 	return nil
 }
+
+// ─── Settlement ───────────────────────────────────────────────────────────────
 
 // settleMatchBets is called in a goroutine when a match finishes.
 // It finds all pending bet slips that contain this fixture and settles them.

@@ -1,29 +1,31 @@
 package workers
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/kadi/backend/internal/config"
+	"github.com/kadi/backend/internal/db"
 	"github.com/kadi/backend/internal/db/queries"
 )
 
-// LiveTickerWorker polls the external sports API every ~12 seconds
+// LiveTickerWorker connects to the TxLINE SSE stream
 // for live match updates (scores, minute, status changes).
 // When a match finishes, it triggers the bet settlement pipeline.
 type LiveTickerWorker struct {
 	cfg      *config.Config
 	fixtures *queries.FixtureStore
 	bankroll *queries.BankrollStore
-	client   *http.Client
+	rdb      *db.RedisClient
 
 	// Track which fixture IDs were live on the last tick to detect transitions
-	previouslyLive map[string]string // fixtureAPIID -> previous status
+	previouslyLive map[string]string // match_id -> previous status
 }
 
 // NewLiveTickerWorker constructs a LiveTickerWorker.
@@ -31,87 +33,133 @@ func NewLiveTickerWorker(
 	cfg *config.Config,
 	fixtures *queries.FixtureStore,
 	bankroll *queries.BankrollStore,
+	rdb *db.RedisClient,
 ) *LiveTickerWorker {
 	return &LiveTickerWorker{
 		cfg:      cfg,
 		fixtures: fixtures,
 		bankroll: bankroll,
-		client: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		rdb:      rdb,
 		previouslyLive: make(map[string]string),
 	}
 }
 
-// Run starts the live ticker loop. Exits when ctx is cancelled.
+// Run starts the live ticker loop with exponential backoff.
 func (w *LiveTickerWorker) Run(ctx context.Context) {
-	interval := time.Duration(w.cfg.LiveTickerIntervalSec) * time.Second
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	log.Println("[live-ticker] worker started — connecting to TxLINE SSE")
 
-	log.Printf("[live-ticker] worker started — polling every %s", interval)
+	backoff := 1 * time.Second
+	maxBackoff := 60 * time.Second
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("[live-ticker] worker stopped")
 			return
-		case <-ticker.C:
-			w.tick(ctx)
+		default:
+			err := w.connectTxLineSSE(ctx)
+			if err != nil {
+				log.Printf("[live-ticker] TxLINE connection error: %v, retrying in %v...", err, backoff)
+				select {
+				case <-time.After(backoff):
+				case <-ctx.Done():
+					return
+				}
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			} else {
+				// Reset backoff on successful connection that ended naturally
+				backoff = 1 * time.Second
+			}
 		}
 	}
 }
 
-// tick performs one polling cycle.
-func (w *LiveTickerWorker) tick(ctx context.Context) {
-	liveFixtures, err := w.fetchLiveFixtures(ctx)
+type TxLineUpdate struct {
+	MatchID   string `json:"match_id"`
+	Status    string `json:"status"`
+	HomeScore int    `json:"home_score"`
+	AwayScore int    `json:"away_score"`
+	Minute    int    `json:"minute"`
+	Odds      struct {
+		Home float64 `json:"home"`
+		Draw float64 `json:"draw"`
+		Away float64 `json:"away"`
+	} `json:"odds"`
+	TxLineSignature string          `json:"txline_signature"`
+	MerkleRoot      string          `json:"merkle_root"`
+	ProofReceipt    json.RawMessage `json:"proof_receipt"`
+}
+
+func (w *LiveTickerWorker) connectTxLineSSE(ctx context.Context) error {
+	url := w.cfg.TxLineStreamURL
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		log.Printf("[live-ticker] ERROR fetching live fixtures: %v", err)
-		return
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	// Set the API Key
+	if w.cfg.TxLineAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+w.cfg.TxLineAPIKey)
 	}
 
-	if len(liveFixtures) == 0 {
-		// Check if any previously-live fixtures have finished
-		w.detectFinishedMatches(ctx)
-		return
+	client := &http.Client{Timeout: 0} // No timeout for SSE connection
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("sse connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	for _, f := range liveFixtures {
-		apiID := fmt.Sprintf("apf-%d", f.Fixture.ID)
-		status := mapStatus(f.Fixture.Status.Short)
-		homeScore := derefInt(f.Goals.Home)
-		awayScore := derefInt(f.Goals.Away)
-		minute := derefInt(f.Fixture.Status.Elapsed)
-
-		// Persist the live update — Supabase Realtime picks this up
-		// and broadcasts it directly to connected Next.js clients
-		if err := w.fixtures.UpdateLiveScore(ctx, apiID, status, homeScore, awayScore, minute); err != nil {
-			log.Printf("[live-ticker] ERROR updating %s: %v", apiID, err)
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		
+		dataStr := strings.TrimPrefix(line, "data: ")
+		if dataStr == "" {
 			continue
 		}
 
-		w.previouslyLive[apiID] = status
+		var update TxLineUpdate
+		if err := json.Unmarshal([]byte(dataStr), &update); err != nil {
+			log.Printf("[live-ticker] failed to parse update: %v", err)
+			continue
+		}
 
-		if status == "finished" {
-			log.Printf("[live-ticker] match FINISHED: %s — triggering settlement", apiID)
-			go w.settleMatchBets(ctx, apiID, homeScore, awayScore)
+		if err := w.fixtures.UpdateLiveScoreWithTxLine(
+			ctx, update.MatchID, update.Status, update.HomeScore, update.AwayScore, update.Minute,
+			update.TxLineSignature, update.MerkleRoot, update.ProofReceipt,
+		); err != nil {
+			log.Printf("[live-ticker] ERROR updating %s: %v", update.MatchID, err)
+			continue
+		}
+
+		// Broadcast to Redis Pub/Sub for frontend clients bypassing Supabase Realtime
+		if err := w.rdb.Client.Publish(ctx, "txline:updates", dataStr).Err(); err != nil {
+			log.Printf("[live-ticker] ERROR publishing to Redis: %v", err)
+		}
+
+		w.previouslyLive[update.MatchID] = update.Status
+
+		if update.Status == "finished" {
+			log.Printf("[live-ticker] match FINISHED: %s — triggering settlement", update.MatchID)
+			go w.settleMatchBets(ctx, update.MatchID, update.HomeScore, update.AwayScore)
 		}
 	}
-}
 
-// detectFinishedMatches checks if any fixture that was live on the previous tick
-// has now transitioned to finished (i.e., it no longer appears in the live feed).
-func (w *LiveTickerWorker) detectFinishedMatches(ctx context.Context) {
-	for apiID, prevStatus := range w.previouslyLive {
-		if prevStatus == "live" {
-			// It disappeared from the live feed — assume it finished
-			log.Printf("[live-ticker] %s no longer live — marking finished", apiID)
-			if err := w.fixtures.UpdateLiveScore(ctx, apiID, "finished", 0, 0, 90); err != nil {
-				log.Printf("[live-ticker] ERROR marking %s finished: %v", apiID, err)
-			}
-			delete(w.previouslyLive, apiID)
-		}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("sse read error: %w", err)
 	}
+	return nil
 }
 
 // settleMatchBets is called in a goroutine when a match finishes.
@@ -174,47 +222,4 @@ func (w *LiveTickerWorker) settleMatchBets(ctx context.Context, apiID string, ho
 			log.Printf("[settle] slip %s settled as %s (return: %.2f)", slip.ID, outcome, returnAmount)
 		}
 	}
-}
-
-// fetchLiveFixtures calls the API-Football /fixtures?live=all endpoint.
-func (w *LiveTickerWorker) fetchLiveFixtures(ctx context.Context) ([]APIFootballFixture, error) {
-	if w.cfg.APIFootballKey == "" {
-		return nil, nil // dev mode: no external fetch
-	}
-
-	url := w.cfg.APIFootballURL + "/fixtures?live=all"
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("x-rapidapi-key", w.cfg.APIFootballKey)
-	req.Header.Set("x-rapidapi-host", "v3.football.api-sports.io")
-
-	resp, err := w.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("live request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var result struct {
-		Response []APIFootballFixture `json:"response"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, fmt.Errorf("parsing live response: %w", err)
-	}
-
-	return result.Response, nil
-}
-
-func derefInt(p *int) int {
-	if p == nil {
-		return 0
-	}
-	return *p
 }

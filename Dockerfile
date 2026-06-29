@@ -1,36 +1,30 @@
-# Stage 1: Builder
-FROM golang:1.23-alpine AS builder
-
-# Install required dependencies for building and fetching SSL certificates
-RUN apk add --no-cache git ca-certificates tzdata
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
-# Copy dependency files first to cache them
+# Copy go mod and sum files
 COPY go.mod go.sum ./
+
+# Download all dependencies. Dependencies will be cached if the go.mod and go.sum files are not changed
 RUN go mod download
 
-# Copy the rest of the source code
+# Copy the source code
 COPY . .
 
-# Build the statically linked Go binary
-# CGO_ENABLED=0 ensures it's fully static
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o kadi-backend ./cmd/server/main.go
+# Build the Go app
+RUN CGO_ENABLED=0 GOOS=linux go build -o main ./cmd/server
 
-# Stage 2: Production (Minimal)
-FROM scratch
+# Start a new stage from scratch for a smaller final image
+FROM alpine:latest  
 
-# Copy SSL certificates from the builder (required for external API/HTTPS calls)
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+WORKDIR /root/
 
-# Copy timezone data
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+# Copy the Pre-built binary file from the previous stage
+COPY --from=builder /app/main .
+COPY --from=builder /app/.env.example .env
 
-# Copy the compiled binary
-COPY --from=builder /app/kadi-backend /kadi-backend
-
-# Expose the API port
+# Expose port 8080 to the outside world
 EXPOSE 8080
 
-# Command to run the application
-ENTRYPOINT ["/kadi-backend"]
+# Command to run the executable
+CMD ["./main"]

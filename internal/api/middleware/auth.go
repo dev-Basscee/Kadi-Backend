@@ -1,4 +1,4 @@
-package auth
+package middleware
 
 import (
 	"errors"
@@ -24,11 +24,21 @@ type Claims struct {
 // MOCKED FOR LOCAL UI TESTING: Always injects a mock UUID.
 func Middleware(jwtSecret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// --- MOCKED AUTH FOR UI TESTING ---
-		// We skip checking the Bearer token and just inject a valid UUID
-		mockUserID := "00000000-0000-0000-0000-000000000001"
-		c.Set(userIDKey, mockUserID)
-		c.Set("isPremium", true) // Grant premium for testing the 3.1-pro model
+		authHeader := c.GetHeader("Authorization")
+		token, err := extractBearer(authHeader)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+
+		claims, err := verifyToken(token, jwtSecret)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid token: " + err.Error()})
+			return
+		}
+
+		c.Set(userIDKey, claims.Subject)
+		c.Set("isPremium", claims.Role == "premium" || claims.Role == "admin")
 
 		c.Next()
 	}

@@ -57,6 +57,7 @@ func NewRouter(cfg *config.Config, dbClient *db.Client, redisClient *db.RedisCli
 		public.GET("/matches", matchHandler.GetTodaysMatches)
 		public.GET("/matches/live", matchHandler.GetLiveMatches)
 		public.GET("/matches/:id", matchHandler.GetMatchByID)
+		public.GET("/matches/:id/verify", matchHandler.GetMatchVerificationData)
 
 		// Public analysis (explanation snippet)
 		public.GET("/analysis/explain/:match_id", analysisHandler.Explain)

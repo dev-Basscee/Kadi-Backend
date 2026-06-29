@@ -14,15 +14,26 @@ import (
 // MatchAnalysis is the structured response returned to the frontend
 // for the DeepDiveModal and AIAnalysisExplainer components.
 type MatchAnalysis struct {
-	Verdict       string   `json:"verdict"`        // e.g. "Home Win"
-	Confidence    int      `json:"confidence"`     // 0-100
-	Summary       string   `json:"summary"`        // 2-3 sentence overview
-	KeyFactors    []string `json:"key_factors"`    // bullet points driving prediction
-	Risks         []string `json:"risks"`          // risks to the prediction
-	BettingAngle  string   `json:"betting_angle"`  // suggested market / angle
-	FormAnalysis  string   `json:"form_analysis"`  // narrative on recent form
-	H2HAnalysis   string   `json:"h2h_analysis"`   // historical head-to-head narrative
-	RecommendedOddsRange string `json:"recommended_odds_range"` // e.g. "1.70 - 1.95"
+	Verdict              string   `json:"verdict"`                // e.g. "Home Win"
+	Confidence           int      `json:"confidence"`             // 0-100
+	Summary              string   `json:"summary"`                // 2-3 sentence overview
+	KeyFactors           []string `json:"key_factors"`            // bullet points driving prediction
+	Risks                []string `json:"risks"`                  // risks to the prediction
+	BettingAngle         string   `json:"betting_angle"`          // suggested market / angle
+	FormAnalysis         string   `json:"form_analysis"`          // narrative on recent form
+	H2HAnalysis          string   `json:"h2h_analysis"`           // historical head-to-head narrative
+	RecommendedOddsRange string   `json:"recommended_odds_range"` // e.g. "1.70 - 1.95"
+
+	// Dynamically generated chart data based on live TxLINE context
+	DynamicProbabilities struct {
+		Home float64 `json:"home"`
+		Draw float64 `json:"draw"`
+		Away float64 `json:"away"`
+	} `json:"dynamic_probabilities"`
+	DynamicFormComparison []struct {
+		TeamName  string `json:"team_name"`
+		FormScore int    `json:"form_score"`
+	} `json:"dynamic_form_comparison"`
 }
 
 // TxLineDataPayload holds live data from TxLINE SSE stream used for dynamic analysis.
@@ -145,7 +156,7 @@ LATEST TxLINE DATA FEED:
 - Shifting Implied Probabilities: Home %.1f%% | Draw %.1f%% | Away %.1f%%
 - Recent Match Events: %s
 
-CRITICAL INSTRUCTION: Explicitly build your analysis around why the market odds are shifting. For example, if there is a red card or a goal in the recent events, analyze how this shifts the implied probabilities using the provided TxLINE dataset.`,
+CRITICAL INSTRUCTION: Explicitly build your analysis around why the market odds are shifting. For example, if there is a red card or a goal in the recent events, analyze how this shifts the implied probabilities using the provided TxLINE dataset. Also adjust dynamic_probabilities and dynamic_form_comparison based on this live context!`,
 			txData.ConsensusOdds.Home, txData.ConsensusOdds.Draw, txData.ConsensusOdds.Away,
 			txData.ImpliedProbabilities.Home, txData.ImpliedProbabilities.Draw, txData.ImpliedProbabilities.Away,
 			string(eventsBytes),
@@ -174,7 +185,16 @@ Return this exact JSON structure:
   "betting_angle": "<recommended market and reasoning>",
   "form_analysis": "<narrative on recent form trends>",
   "h2h_analysis": "<historical head-to-head narrative>",
-  "recommended_odds_range": "<e.g. 1.70 - 1.95>"
+  "recommended_odds_range": "<e.g. 1.70 - 1.95>",
+  "dynamic_probabilities": {
+    "home": <float 0-100>,
+    "draw": <float 0-100>,
+    "away": <float 0-100>
+  },
+  "dynamic_form_comparison": [
+    { "team_name": "%s", "form_score": <int 0-100> },
+    { "team_name": "%s", "form_score": <int 0-100> }
+  ]
 }`,
 		f.Sport,
 		f.HomeTeamName, homeForm,
@@ -184,6 +204,7 @@ Return this exact JSON structure:
 		f.ProbabilityHome, f.ProbabilityDraw, f.ProbabilityAway,
 		f.Status,
 		txLineContext,
+		f.HomeTeamName, f.AwayTeamName,
 	)
 }
 

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -77,4 +78,33 @@ func (h *MatchHandler) GetMatchByID(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": fixture})
+}
+
+// GetMatchVerificationData returns TxLINE cryptographic signatures and Merkle proofs for a match.
+//
+// GET /api/v1/matches/:id/verify
+func (h *MatchHandler) GetMatchVerificationData(c *gin.Context) {
+	id := c.Param("id")
+	if id == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "match id is required"})
+		return
+	}
+
+	fixture, err := h.fixtures.GetByID(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "match not found"})
+		return
+	}
+
+	if fixture.TxlineSignature == nil || fixture.MerkleRoot == nil || len(fixture.ProofReceipt) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "verification data not available for this match"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"match_id":         fixture.ID,
+		"txline_signature": *fixture.TxlineSignature,
+		"merkle_root":      *fixture.MerkleRoot,
+		"proof_receipt":    json.RawMessage(fixture.ProofReceipt),
+	})
 }

@@ -1,13 +1,11 @@
 package middleware
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/redis/go-redis/v9"
 	"github.com/kadi/backend/internal/db"
 )
 
@@ -29,7 +27,7 @@ func RateLimit(rdb *db.RedisClient, limit int) gin.HandlerFunc {
 			return
 		}
 
-		ctx := context.Background()
+		ctx := c.Request.Context()
 		today := time.Now().UTC().Format("2006-01-02")
 		key := fmt.Sprintf("ratelimit:%s:deepdive:%s", userID, today)
 

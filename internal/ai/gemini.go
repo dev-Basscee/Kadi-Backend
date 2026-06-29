@@ -25,6 +25,24 @@ type MatchAnalysis struct {
 	RecommendedOddsRange string `json:"recommended_odds_range"` // e.g. "1.70 - 1.95"
 }
 
+// TxLineDataPayload holds live data from TxLINE SSE stream used for dynamic analysis.
+type TxLineDataPayload struct {
+	ConsensusOdds struct {
+		Home float64 `json:"home"`
+		Draw float64 `json:"draw"`
+		Away float64 `json:"away"`
+	} `json:"consensus_odds"`
+	ImpliedProbabilities struct {
+		Home float64 `json:"home"`
+		Draw float64 `json:"draw"`
+		Away float64 `json:"away"`
+	} `json:"implied_probabilities"`
+	MatchEvents []struct {
+		Type   string `json:"type"`
+		Detail string `json:"detail"`
+	} `json:"match_events"`
+}
+
 // GeminiClient wraps the Google Generative AI SDK for structured sports analysis.
 type GeminiClient struct {
 	client *genai.Client
@@ -47,8 +65,8 @@ func (g *GeminiClient) Close() error {
 
 // AnalyzeMatch performs a full deep-dive analysis on a fixture and returns
 // a structured MatchAnalysis. It uses the specified model (e.g. flash vs pro).
-func (g *GeminiClient) AnalyzeMatch(ctx context.Context, f *queries.Fixture, modelName string) (*MatchAnalysis, error) {
-	prompt := buildDeepDivePrompt(f)
+func (g *GeminiClient) AnalyzeMatch(ctx context.Context, f *queries.Fixture, txData *TxLineDataPayload, modelName string) (*MatchAnalysis, error) {
+	prompt := buildDeepDivePrompt(f, txData)
 	
 	// If no model provided, fallback to the default configured model
 	if modelName == "" {
@@ -66,9 +84,13 @@ func (g *GeminiClient) AnalyzeMatch(ctx context.Context, f *queries.Fixture, mod
 	var analysis MatchAnalysis
 	if err := json.Unmarshal([]byte(jsonStr), &analysis); err != nil {
 		// Fallback: return a text-only summary if JSON parsing fails
+		confidence := int(f.ProbabilityAway)
+		if f.ProbabilityHome > f.ProbabilityAway {
+			confidence = int(f.ProbabilityHome)
+		}
 		return &MatchAnalysis{
 			Summary:    raw,
-			Confidence: f.ProbabilityHome > f.ProbabilityAway ? int(f.ProbabilityHome) : int(f.ProbabilityAway),
+			Confidence: confidence,
 		}, nil
 	}
 	return &analysis, nil
@@ -110,9 +132,25 @@ func (g *GeminiClient) generate(ctx context.Context, prompt, modelName string) (
 }
 
 // buildDeepDivePrompt constructs a rich context prompt for full match analysis.
-func buildDeepDivePrompt(f *queries.Fixture) string {
+func buildDeepDivePrompt(f *queries.Fixture, txData *TxLineDataPayload) string {
 	homeForm := formatForm(f.HomeForm)
 	awayForm := formatForm(f.AwayForm)
+
+	txLineContext := ""
+	if txData != nil {
+		eventsBytes, _ := json.Marshal(txData.MatchEvents)
+		txLineContext = fmt.Sprintf(`
+LATEST TxLINE DATA FEED:
+- Live Consensus Odds: Home %.2f | Draw %.2f | Away %.2f
+- Shifting Implied Probabilities: Home %.1f%% | Draw %.1f%% | Away %.1f%%
+- Recent Match Events: %s
+
+CRITICAL INSTRUCTION: Explicitly build your analysis around why the market odds are shifting. For example, if there is a red card or a goal in the recent events, analyze how this shifts the implied probabilities using the provided TxLINE dataset.`,
+			txData.ConsensusOdds.Home, txData.ConsensusOdds.Draw, txData.ConsensusOdds.Away,
+			txData.ImpliedProbabilities.Home, txData.ImpliedProbabilities.Draw, txData.ImpliedProbabilities.Away,
+			string(eventsBytes),
+		)
+	}
 
 	return fmt.Sprintf(`You are Kadi AI, an elite sports analytics engine. Analyze the following match and return ONLY valid JSON — no markdown, no explanation outside the JSON.
 
@@ -124,6 +162,7 @@ MATCH CONTEXT:
 - Current Odds: Home %.2f | Draw %.2f | Away %.2f
 - Model Probabilities: Home %.1f%% | Draw %.1f%% | Away %.1f%%
 - Match Status: %s
+%s
 
 Return this exact JSON structure:
 {
@@ -144,6 +183,7 @@ Return this exact JSON structure:
 		f.OddsHome, f.OddsDraw, f.OddsAway,
 		f.ProbabilityHome, f.ProbabilityDraw, f.ProbabilityAway,
 		f.Status,
+		txLineContext,
 	)
 }
 

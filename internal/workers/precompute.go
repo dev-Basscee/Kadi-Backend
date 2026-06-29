@@ -84,7 +84,7 @@ func (w *PrecomputeWorker) runPrecomputeBatch(ctx context.Context) {
 		}
 
 		// Use the cost-effective model for batch processing
-		analysis, err := w.gemini.AnalyzeMatch(ctx, &fixture, "gemini-1.5-flash")
+		analysis, err := w.gemini.AnalyzeMatch(ctx, &fixture, nil, "gemini-1.5-flash")
 		if err != nil {
 			log.Printf("[precompute] failed analysis for %s: %v", fixture.ID, err)
 			continue

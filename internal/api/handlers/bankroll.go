@@ -24,7 +24,7 @@ func NewBankrollHandler(bankroll *queries.BankrollStore) *BankrollHandler {
 // GET /api/v1/bankroll/balance
 // Requires: Authorization: Bearer <supabase-jwt>
 func (h *BankrollHandler) GetBalance(c *gin.Context) {
-	userID := auth.GetUserID(c)
+	userID := middleware.GetUserID(c)
 
 	balance, err := h.bankroll.GetBalance(c.Request.Context(), userID)
 	if err != nil {
@@ -40,7 +40,7 @@ func (h *BankrollHandler) GetBalance(c *gin.Context) {
 // GET /api/v1/bankroll/ledger?limit=50
 // Requires: Authorization: Bearer <supabase-jwt>
 func (h *BankrollHandler) GetLedger(c *gin.Context) {
-	userID := auth.GetUserID(c)
+	userID := middleware.GetUserID(c)
 
 	limit := 50
 	if l := c.Query("limit"); l != "" {
@@ -71,7 +71,7 @@ func (h *BankrollHandler) GetLedger(c *gin.Context) {
 //	  ]
 //	}
 func (h *BankrollHandler) PlaceBet(c *gin.Context) {
-	userID := auth.GetUserID(c)
+	userID := middleware.GetUserID(c)
 
 	var req struct {
 		StakeAmount float64 `json:"stake_amount" binding:"required,gt=0"`

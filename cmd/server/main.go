@@ -64,7 +64,7 @@ func main() {
 	// ─── Background Workers ─────────────────────────────────────────────────
 	// Each worker runs in its own goroutine and respects context cancellation.
 	dailySync := workers.NewDailySyncWorker(cfg, fixtureStore)
-	liveTicker := workers.NewLiveTickerWorker(cfg, fixtureStore, bankrollStore)
+	liveTicker := workers.NewLiveTickerWorker(cfg, fixtureStore, bankrollStore, redisClient)
 	precompute := workers.NewPrecomputeWorker(fixtureStore, geminiClient, redisClient)
 
 	go dailySync.Run(ctx)

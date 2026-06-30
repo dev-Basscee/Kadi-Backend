@@ -36,7 +36,9 @@ type Config struct {
 // Values already set in the OS environment take precedence over .env.
 func Load() (*Config, error) {
 	// Best-effort: load shared frontend .env.local, then local fallbacks
-	_ = godotenv.Load("../Kadi/.env.local", ".env.local", ".env")
+	_ = godotenv.Load("../Kadi/.env.local")
+	_ = godotenv.Load(".env.local")
+	_ = godotenv.Load(".env")
 
 	cfg := &Config{
 		Port:                   getEnv("PORT", "8080"),

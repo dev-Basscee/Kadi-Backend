@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -55,6 +56,9 @@ func Load() (*Config, error) {
 		Env:               getEnv("ENV", "development"),
 	}
 
+	// Validate DATABASE_URL is the pooler URL, not the direct IPv6 host.
+	validateDatabaseURL(cfg.DatabaseURL)
+
 	return cfg, nil
 }
 
@@ -78,4 +82,24 @@ func mustEnv(key string) string {
 		panic(fmt.Sprintf("required environment variable %q is not set", key))
 	}
 	return v
+}
+
+// validateDatabaseURL checks that DATABASE_URL points to the Supabase Connection
+// Pooler and not the direct host. The direct host (db.<ref>.supabase.co)
+// resolves to an IPv6 address which is unreachable on platforms like Render.
+// The pooler URL (aws-0-<region>.pooler.supabase.com:6543) uses IPv4.
+func validateDatabaseURL(url string) {
+	// Skip validation for non-Supabase URLs (local Postgres, Docker, etc.)
+	if !strings.Contains(url, "supabase") {
+		return
+	}
+	if strings.Contains(url, "supabase.co") && !strings.Contains(url, "pooler.supabase.com") {
+		panic(
+			"[config] FATAL: DATABASE_URL is set to the direct Supabase host (db.<ref>.supabase.co).\n" +
+				"Direct connections resolve to IPv6 and will fail on Render with 'network is unreachable'.\n" +
+				"FIX: Go to Supabase > Project Settings > Database > Connection String.\n" +
+				"Enable 'Use connection pooling' and copy the pooler URL.\n" +
+				"Expected format: postgres://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:6543/postgres",
+		)
+	}
 }

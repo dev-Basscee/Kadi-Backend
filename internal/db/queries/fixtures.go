@@ -149,13 +149,13 @@ func (s *FixtureStore) UpsertFixture(ctx context.Context, f *Fixture) error {
 			$25,$26,$27
 		)
 		ON CONFLICT (api_id) DO UPDATE SET
+			home_team_name  = EXCLUDED.home_team_name,
+			away_team_name  = EXCLUDED.away_team_name,
+			match_date      = EXCLUDED.match_date,
 			status          = EXCLUDED.status,
 			home_score      = EXCLUDED.home_score,
 			away_score      = EXCLUDED.away_score,
 			minute          = EXCLUDED.minute,
-			odds_home       = EXCLUDED.odds_home,
-			odds_draw       = EXCLUDED.odds_draw,
-			odds_away       = EXCLUDED.odds_away,
 			txline_signature= EXCLUDED.txline_signature,
 			merkle_root     = EXCLUDED.merkle_root,
 			proof_receipt   = EXCLUDED.proof_receipt,

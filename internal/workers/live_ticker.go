@@ -151,7 +151,7 @@ func (e *TxLineEvent) toStatus() string {
 	}
 	switch e.StatusID {
 	case 1:
-		return "scheduled"
+		return "upcoming"
 	case 2:
 		return "live"
 	case 3:
@@ -160,9 +160,9 @@ func (e *TxLineEvent) toStatus() string {
 		return "live" // in-progress per confirmed test data
 	default:
 		if e.GameState != "" {
-			return e.GameState
+			return strings.ToLower(e.GameState)
 		}
-		return "unknown"
+		return "upcoming"
 	}
 }
 

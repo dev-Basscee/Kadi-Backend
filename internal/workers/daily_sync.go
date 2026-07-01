@@ -88,8 +88,8 @@ func (f *TxLineFixture) GetStatus() string {
 	}
 	s = strings.ToLower(s)
 	switch s {
-	case "notstarted", "prematch", "scheduled":
-		return "scheduled"
+	case "notstarted", "prematch", "scheduled", "upcoming":
+		return "upcoming"
 	case "inprogress", "live", "playing", "halftime", "in-play":
 		return "live"
 	case "finished", "ended", "ft":
@@ -99,7 +99,7 @@ func (f *TxLineFixture) GetStatus() string {
 	case "postponed":
 		return "postponed"
 	default:
-		return "scheduled"
+		return "upcoming"
 	}
 }
 

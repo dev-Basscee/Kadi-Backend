@@ -52,16 +52,16 @@ func (w *DailySyncWorker) Run(ctx context.Context) {
 
 // TxLineFixture represents a single fixture from the snapshot API
 type TxLineFixture struct {
-	FixtureID   int    `json:"FixtureId"`
-	FixtureID2  int    `json:"fixtureId"`
-	HomeTeam    string `json:"HomeTeam"`
-	HomeTeam2   string `json:"homeTeam"`
-	AwayTeam    string `json:"AwayTeam"`
-	AwayTeam2   string `json:"awayTeam"`
-	KickoffTime string `json:"StartTime"`
-	KickoffTime2 string `json:"kickoffTime"`
-	Status      string `json:"Status"`
-	Status2     string `json:"status"`
+	FixtureID   int         `json:"FixtureId"`
+	FixtureID2  int         `json:"fixtureId"`
+	HomeTeam    string      `json:"HomeTeam"`
+	HomeTeam2   string      `json:"homeTeam"`
+	AwayTeam    string      `json:"AwayTeam"`
+	AwayTeam2   string      `json:"awayTeam"`
+	KickoffTime interface{} `json:"StartTime"`
+	KickoffTime2 interface{} `json:"kickoffTime"`
+	Status      string      `json:"Status"`
+	Status2     string      `json:"status"`
 }
 
 func (f *TxLineFixture) GetID() string {

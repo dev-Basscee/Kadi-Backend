@@ -197,6 +197,17 @@ func (s *FixtureStore) UpdateLiveScoreWithTxLine(ctx context.Context, apiID, sta
 	return err
 }
 
+// UpdateOdds atomically updates the 1X2 odds for a fixture.
+func (s *FixtureStore) UpdateOdds(ctx context.Context, apiID string, home, draw, away float64) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE fixtures
+		SET odds_home = $2, odds_draw = $3, odds_away = $4, updated_at = NOW()
+		WHERE api_id = $1`,
+		apiID, home, draw, away,
+	)
+	return err
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
 
 type scannable interface {

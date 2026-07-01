@@ -143,7 +143,7 @@ func (w *DailySyncWorker) syncFixtures(ctx context.Context) {
 
 		f := &queries.Fixture{
 			ApiID:        apiID,
-			Sport:        "soccer",
+			Sport:        "football",
 			HomeTeamName: txF.GetHome(),
 			AwayTeamName: txF.GetAway(),
 			MatchDate:    time.Now().Truncate(24 * time.Hour), // Set to today for testing

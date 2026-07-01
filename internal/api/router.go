@@ -37,6 +37,7 @@ func NewRouter(cfg *config.Config, dbClient *db.Client, redisClient *db.RedisCli
 	matchHandler := handlers.NewMatchHandler(fixtureStore)
 	bankrollHandler := handlers.NewBankrollHandler(bankrollStore)
 	analysisHandler := handlers.NewAnalysisHandler(fixtureStore, gemini, redisClient)
+	txlineHandler := handlers.NewTxLineHandler(cfg)
 
 	// ─── Health Check (public) ──────────────────────────────────────────────
 	r.GET("/health", func(c *gin.Context) {
@@ -58,6 +59,12 @@ func NewRouter(cfg *config.Config, dbClient *db.Client, redisClient *db.RedisCli
 		public.GET("/matches/live", matchHandler.GetLiveMatches)
 		public.GET("/matches/:id", matchHandler.GetMatchByID)
 		public.GET("/matches/:id/verify", matchHandler.GetMatchVerificationData)
+
+		// TxLine Proxies
+		public.GET("/txline/scores/snapshot/:id", txlineHandler.GetScoresSnapshot)
+		public.GET("/txline/scores/updates/:id", txlineHandler.GetScoresUpdates)
+		public.GET("/txline/scores/historical/:id", txlineHandler.GetScoresHistorical)
+		public.GET("/txline/odds/snapshot/:id", txlineHandler.GetOddsSnapshot)
 
 		// Public analysis (explanation snippet)
 		public.GET("/analysis/explain/:match_id", analysisHandler.Explain)

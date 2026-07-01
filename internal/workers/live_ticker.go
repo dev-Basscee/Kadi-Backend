@@ -300,6 +300,9 @@ func (w *LiveTickerWorker) connectTxLineScoresSSE(ctx context.Context) error {
 		}
 
 		matchID  := event.toMatchID()
+		if matchID == "" || matchID == "0" {
+			continue
+		}
 		status   := event.toStatus()
 		home     := event.toHomeScore()
 		away     := event.toAwayScore()
@@ -401,7 +404,11 @@ func (w *LiveTickerWorker) connectTxLineOddsSSE(ctx context.Context) error {
 				matchID = fmt.Sprintf("%v", event.FixtureID2)
 			}
 
-			if matchID != "" && len(event.Prices) > 0 {
+			if matchID == "" || matchID == "0" {
+				continue
+			}
+
+			if len(event.Prices) > 0 {
 				var home, draw, away float64
 				for _, p := range event.Prices {
 					switch p.Selection {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -36,6 +37,10 @@ func New(ctx context.Context, dsn string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("db: failed to parse DSN: %w", err)
 	}
+
+	// Disable statement caching to fix "prepared statement already exists" (SQLSTATE 42P05)
+	// when using Supabase PgBouncer (transaction pooling mode).
+	poolCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
 
 	// Pool tuning — adjust based on Supabase plan limits
 	poolCfg.MaxConns = 20

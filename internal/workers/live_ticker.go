@@ -206,22 +206,29 @@ func NewLiveTickerWorker(
 	}
 }
 
-// Run starts the live ticker loop with exponential backoff.
+// Run starts the live ticker loops with exponential backoff.
 func (w *LiveTickerWorker) Run(ctx context.Context) {
 	log.Println("[live-ticker] worker started — connecting to TxLINE SSE")
 
+	go w.runStream(ctx, "scores", w.connectTxLineScoresSSE)
+	go w.runStream(ctx, "odds", w.connectTxLineOddsSSE)
+
+	<-ctx.Done()
+	log.Println("[live-ticker] worker stopped")
+}
+
+func (w *LiveTickerWorker) runStream(ctx context.Context, name string, connectFunc func(context.Context) error) {
 	backoff := 1 * time.Second
 	maxBackoff := 60 * time.Second
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[live-ticker] worker stopped")
 			return
 		default:
-			err := w.connectTxLineSSE(ctx)
+			err := connectFunc(ctx)
 			if err != nil {
-				log.Printf("[live-ticker] TxLINE connection error: %v, retrying in %v...", err, backoff)
+				log.Printf("[live-ticker][%s] TxLINE connection error: %v, retrying in %v...", name, err, backoff)
 				select {
 				case <-time.After(backoff):
 				case <-ctx.Done():
@@ -232,16 +239,14 @@ func (w *LiveTickerWorker) Run(ctx context.Context) {
 					backoff = maxBackoff
 				}
 			} else {
-				// Reset backoff on successful connection that ended naturally
 				backoff = 1 * time.Second
 			}
 		}
 	}
 }
 
-// connectTxLineSSE fetches a fresh guest JWT, then opens the SSE stream with
-// both required headers and processes events until the connection drops.
-func (w *LiveTickerWorker) connectTxLineSSE(ctx context.Context) error {
+// connectTxLineScoresSSE fetches a fresh guest JWT, then opens the scores SSE stream.
+func (w *LiveTickerWorker) connectTxLineScoresSSE(ctx context.Context) error {
 	// ── Step 1: fetch a fresh short-lived guest JWT ───────────────────────────
 	jwt, err := fetchGuestJWT(ctx, w.cfg.TxLineStreamURL)
 	if err != nil {
@@ -323,6 +328,97 @@ func (w *LiveTickerWorker) connectTxLineSSE(ctx context.Context) error {
 
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("sse read error: %w", err)
+	}
+	return nil
+}
+
+// connectTxLineOddsSSE fetches a fresh guest JWT, then opens the odds SSE stream.
+func (w *LiveTickerWorker) connectTxLineOddsSSE(ctx context.Context) error {
+	baseURL := w.cfg.TxLineStreamURL
+	if idx := strings.Index(baseURL, "/api/"); idx != -1 {
+		baseURL = baseURL[:idx]
+	}
+
+	jwt, err := fetchGuestJWT(ctx, w.cfg.TxLineStreamURL)
+	if err != nil {
+		return fmt.Errorf("failed to fetch guest JWT for odds: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/odds/stream", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("X-Api-Token", w.cfg.TxLineAPIKey)
+
+	client := &http.Client{Timeout: 0}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("odds sse connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("odds unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+
+	log.Println("[live-ticker] Odds SSE stream connected — receiving events")
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		dataStr := strings.TrimPrefix(line, "data: ")
+		if dataStr == "" {
+			continue
+		}
+
+		// Try to parse basic odds info if available, or just broadcast
+		var event struct {
+			FixtureID interface{} `json:"FixtureId"`
+			FixtureID2 interface{} `json:"fixtureId"`
+			Prices    []struct {
+				Selection string  `json:"selection"`
+				Price     float64 `json:"price"`
+			} `json:"prices"`
+		}
+
+		// Broadcast raw event to Redis Pub/Sub for frontend clients
+		if err := w.rdb.Client.Publish(ctx, "txline:odds", dataStr).Err(); err != nil {
+			log.Printf("[live-ticker] ERROR publishing odds to Redis: %v", err)
+		}
+
+		if err := json.Unmarshal([]byte(dataStr), &event); err == nil {
+			var matchID string
+			if event.FixtureID != nil {
+				matchID = fmt.Sprintf("%v", event.FixtureID)
+			} else if event.FixtureID2 != nil {
+				matchID = fmt.Sprintf("%v", event.FixtureID2)
+			}
+
+			if matchID != "" && len(event.Prices) > 0 {
+				var home, draw, away float64
+				for _, p := range event.Prices {
+					switch p.Selection {
+					case "1", "home": home = p.Price
+					case "X", "draw": draw = p.Price
+					case "2", "away": away = p.Price
+					}
+				}
+				if home > 0 && draw > 0 && away > 0 {
+					w.fixtures.UpdateOdds(ctx, matchID, home, draw, away)
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("odds sse read error: %w", err)
 	}
 	return nil
 }

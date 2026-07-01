@@ -82,9 +82,25 @@ func (f *TxLineFixture) GetAway() string {
 }
 
 func (f *TxLineFixture) GetStatus() string {
-	if f.Status != "" { return f.Status }
-	if f.Status2 != "" { return f.Status2 }
-	return "scheduled"
+	s := f.Status
+	if s == "" {
+		s = f.Status2
+	}
+	s = strings.ToLower(s)
+	switch s {
+	case "notstarted", "prematch", "scheduled":
+		return "scheduled"
+	case "inprogress", "live", "playing", "halftime", "in-play":
+		return "live"
+	case "finished", "ended", "ft":
+		return "finished"
+	case "cancelled":
+		return "cancelled"
+	case "postponed":
+		return "postponed"
+	default:
+		return "scheduled"
+	}
 }
 
 func (w *DailySyncWorker) syncFixtures(ctx context.Context) {

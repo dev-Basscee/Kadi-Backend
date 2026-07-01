@@ -54,9 +54,9 @@ func (w *DailySyncWorker) Run(ctx context.Context) {
 type TxLineFixture struct {
 	FixtureID   int         `json:"FixtureId"`
 	FixtureID2  int         `json:"fixtureId"`
-	HomeTeam    string      `json:"HomeTeam"`
+	HomeTeam    string      `json:"Participant1"`
 	HomeTeam2   string      `json:"homeTeam"`
-	AwayTeam    string      `json:"AwayTeam"`
+	AwayTeam    string      `json:"Participant2"`
 	AwayTeam2   string      `json:"awayTeam"`
 	KickoffTime interface{} `json:"StartTime"`
 	KickoffTime2 interface{} `json:"kickoffTime"`

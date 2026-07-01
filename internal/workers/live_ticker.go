@@ -381,44 +381,51 @@ func (w *LiveTickerWorker) connectTxLineOddsSSE(ctx context.Context) error {
 			continue
 		}
 
-		// Try to parse basic odds info if available, or just broadcast
-		var event struct {
-			FixtureID interface{} `json:"FixtureId"`
-			FixtureID2 interface{} `json:"fixtureId"`
-			Prices    []struct {
-				Selection string  `json:"selection"`
-				Price     float64 `json:"price"`
-			} `json:"prices"`
-		}
-
 		// Broadcast raw event to Redis Pub/Sub for frontend clients
 		if err := w.rdb.Client.Publish(ctx, "txline:odds", dataStr).Err(); err != nil {
 			log.Printf("[live-ticker] ERROR publishing odds to Redis: %v", err)
 		}
 
-		if err := json.Unmarshal([]byte(dataStr), &event); err == nil {
-			var matchID string
-			if event.FixtureID != nil {
-				matchID = fmt.Sprintf("%v", event.FixtureID)
-			} else if event.FixtureID2 != nil {
-				matchID = fmt.Sprintf("%v", event.FixtureID2)
-			}
+		// Try to parse basic odds info if available, or just broadcast
+		var event struct {
+			FixtureID  interface{} `json:"FixtureId"`
+			FixtureID2 interface{} `json:"fixtureId"`
+			PriceNames []string    `json:"PriceNames"`
+			Prices     []float64   `json:"Prices"`
+		}
+		if err := json.Unmarshal([]byte(dataStr), &event); err != nil {
+			continue
+		}
 
-			if matchID == "" || matchID == "0" {
-				continue
-			}
+		matchID := ""
+		if event.FixtureID != nil {
+			matchID = fmt.Sprintf("%v", event.FixtureID)
+		} else if event.FixtureID2 != nil {
+			matchID = fmt.Sprintf("%v", event.FixtureID2)
+		}
 
-			if len(event.Prices) > 0 {
-				var home, draw, away float64
-				for _, p := range event.Prices {
-					switch p.Selection {
-					case "1", "home": home = p.Price
-					case "X", "draw": draw = p.Price
-					case "2", "away": away = p.Price
-					}
+		if matchID == "" || matchID == "0" {
+			continue
+		}
+
+		if len(event.PriceNames) > 0 && len(event.Prices) == len(event.PriceNames) {
+			var home, draw, away float64
+			for i, name := range event.PriceNames {
+				val := event.Prices[i] / 1000.0
+				switch strings.ToLower(name) {
+				case "1", "home":
+					home = val
+				case "x", "draw":
+					draw = val
+				case "2", "away":
+					away = val
 				}
-				if home > 0 && draw > 0 && away > 0 {
-					w.fixtures.UpdateOdds(ctx, matchID, home, draw, away)
+			}
+
+			if home > 0 || draw > 0 || away > 0 {
+				err = w.fixtures.UpdateOdds(ctx, matchID, home, draw, away)
+				if err != nil {
+					log.Printf("[live-ticker] ERROR updating odds for fixture %s: %v", matchID, err)
 				}
 			}
 		}
